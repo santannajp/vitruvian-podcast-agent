@@ -1,0 +1,53 @@
+# Environment
+.env
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+dist/
+build/
+.eggs/
+*.egg
+
+# Virtual environments
+venv/
+.venv/
+env/
+audioagent/
+.env_backup
+
+# Output
+podcast.mp3
+output/
+*.mp3
+*.wav
+
+# Piper models (large binary files)
+models/*.onnx
+models/*.onnx.json
+
+# IDEs
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Claude Code local config
+.claude/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Test artifacts
+test_results.txt
+
+# NotebookLM browser session (stored globally at ~/.notebooklm/)
+.notebooklm/
+
+# Temp files
+*.tmp

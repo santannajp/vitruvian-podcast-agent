@@ -84,6 +84,11 @@ OPENAI_TTS_MODEL: str = os.getenv("OPENAI_TTS_MODEL", "tts-1-hd")
 OPENAI_TTS_VOICE_A: str = os.getenv("OPENAI_TTS_VOICE_A", "onyx")   # Host1 — deep male
 OPENAI_TTS_VOICE_B: str = os.getenv("OPENAI_TTS_VOICE_B", "nova")   # Host2 — warm female
 
+# Microsoft Edge TTS — free, no API key.
+# Defaults target pt-BR. Override via .env or sidebar for other languages.
+EDGE_TTS_VOICE_A: str = os.getenv("EDGE_TTS_VOICE_A", "pt-BR-AntonioNeural")     # Host1 — male
+EDGE_TTS_VOICE_B: str = os.getenv("EDGE_TTS_VOICE_B", "pt-BR-FranciscaNeural")   # Host2 — female
+
 # ---------------------------------------------------------------------------
 # Provider selection (Phase 3)
 # ---------------------------------------------------------------------------

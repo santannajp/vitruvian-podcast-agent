@@ -135,15 +135,29 @@ class NotebookLMPodcastProvider:
     ) -> str:
         from notebooklm import NotebookLMClient  # type: ignore[import]
 
+        print("      [NLM] Connecting to NotebookLM...")
         async with await NotebookLMClient.from_storage() as client:
+            print("      [NLM] Creating temporary notebook...")
             nb = await client.notebooks.create("Vitruvian-Audio-Temp")
+            print(f"      [NLM] Notebook created: {nb.id}")
             try:
                 await self._add_source(client, nb.id, content, markdown_text)
+
+                # Verify sources were actually added before generating
+                sources = await client.sources.list(nb.id)
+                if not sources:
+                    raise RuntimeError(
+                        "NotebookLM accepted the source but no sources appear in the notebook. "
+                        "The content may be too short, empty, or in an unsupported format."
+                    )
+                print(f"      [NLM] Verified: {len(sources)} source(s) in notebook")
+
                 await self._generate_and_download(
                     client, nb.id, language_code, output_path
                 )
             finally:
                 try:
+                    print("      [NLM] Cleaning up temporary notebook...")
                     await client.notebooks.delete(nb.id)
                 except Exception:
                     # Cleanup failure is non-fatal.
@@ -155,15 +169,20 @@ class NotebookLMPodcastProvider:
         """Add the appropriate source type to the notebook."""
         if content.source_type == SourceType.URL:
             # Pass the URL directly — NotebookLM fetches the full article.
+            print(f"      [NLM] Adding URL source: {content.source_value}")
             await client.sources.add_url(notebook_id, content.source_value, wait=True)
+            print("      [NLM] URL source added successfully")
         else:
             # For text and file inputs, send the pre-converted Markdown.
+            text_preview = markdown_text[:80].replace('\n', ' ')
+            print(f"      [NLM] Adding text source ({len(markdown_text)} chars): {text_preview}...")
             await client.sources.add_text(
                 notebook_id,
                 title="Content",
                 content=markdown_text,
                 wait=True,
             )
+            print("      [NLM] Text source added successfully")
 
     async def _generate_and_download(
         self,
@@ -173,19 +192,63 @@ class NotebookLMPodcastProvider:
         output_path: str,
     ) -> None:
         """Trigger audio generation, wait for completion, and download."""
+        import asyncio as _asyncio
         instructions: Optional[str] = config.NOTEBOOKLM_INSTRUCTIONS or None
+
+        nlm_lang = _map_language(language_code)
+        fmt = _audio_format()
+        length = _audio_length()
+        print(f"      [NLM] Requesting audio generation (lang={nlm_lang}, format={fmt}, length={length})...")
 
         status = await client.artifacts.generate_audio(
             notebook_id,
-            language=_map_language(language_code),
-            audio_format=_audio_format(),
-            audio_length=_audio_length(),
+            language=nlm_lang,
+            audio_format=fmt,
+            audio_length=length,
             instructions=instructions,
         )
+        print(f"      [NLM] Generation task submitted: {status.task_id}")
+        print(f"      [NLM] Waiting for completion (timeout={config.NOTEBOOKLM_WAIT_TIMEOUT}s)...")
 
-        await client.artifacts.wait_for_completion(
-            notebook_id, status.task_id, timeout=config.NOTEBOOKLM_WAIT_TIMEOUT
-        )
+        # Poll with progress feedback instead of silent wait
+        import time as _time
+        start = _time.monotonic()
+        poll_interval = 5.0
+        max_interval = 15.0
+
+        while True:
+            poll_result = await client.artifacts.poll_status(notebook_id, status.task_id)
+            elapsed = _time.monotonic() - start
+
+            if poll_result.is_complete:
+                print(f"      [NLM] ✅ Audio generation complete! ({elapsed:.0f}s)")
+                break
+
+            if poll_result.is_failed:
+                error_msg = getattr(poll_result, 'error', None) or 'Unknown error'
+                raise RuntimeError(
+                    f"NotebookLM audio generation failed: {error_msg}"
+                )
+
+            if poll_result.status == "not_found":
+                if elapsed > 30:
+                    raise RuntimeError(
+                        "NotebookLM removed the generation task. This may indicate "
+                        "a daily quota limit was exceeded, or the content was rejected. "
+                        "Try again later or with different content."
+                    )
+
+            if elapsed > config.NOTEBOOKLM_WAIT_TIMEOUT:
+                raise TimeoutError(
+                    f"NotebookLM audio generation timed out after {elapsed:.0f}s "
+                    f"(status: {poll_result.status}). The content may be too long "
+                    f"or the service may be overloaded. Try again later or use "
+                    f"a shorter input."
+                )
+
+            print(f"      [NLM] ⏳ Status: {poll_result.status} ({elapsed:.0f}s elapsed)...")
+            await _asyncio.sleep(poll_interval)
+            poll_interval = min(poll_interval * 1.5, max_interval)
 
         # On Windows, os.rename() fails if the destination already exists.
         # The Streamlit app pre-creates the temp file, so we remove it first.
@@ -193,4 +256,6 @@ class NotebookLMPodcastProvider:
         if _os.path.exists(output_path):
             _os.remove(output_path)
 
+        print("      [NLM] Downloading audio file...")
         await client.artifacts.download_audio(notebook_id, output_path)
+        print(f"      [NLM] ✅ Audio saved to {output_path}")

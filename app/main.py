@@ -66,7 +66,7 @@ def build_tts_provider() -> TTSProvider:
     """
     Instantiate and return the active TTS provider based on config.TTS_PROVIDER.
 
-    Supported values: "piper" (default), "elevenlabs".
+    Supported values: "edge" (default), "piper", "elevenlabs".
 
     Returns:
         A TTSProvider instance.
@@ -75,18 +75,45 @@ def build_tts_provider() -> TTSProvider:
         ValueError: If an unknown provider name is specified.
     """
     provider_name = config.TTS_PROVIDER.lower()
+    if provider_name == "edge":
+        from tts.edge_provider import EdgeTTSProvider
+        return EdgeTTSProvider()
     if provider_name == "piper":
         from tts.piper_provider import PiperProvider
         return PiperProvider()
     if provider_name == "elevenlabs":
         from tts.elevenlabs_provider import ElevenLabsProvider
         return ElevenLabsProvider()
-    if provider_name == "openai":
-        from tts.openai_provider import OpenAITTSProvider
-        return OpenAITTSProvider()
     raise ValueError(
         f"Unknown TTS_PROVIDER '{config.TTS_PROVIDER}'. "
-        "Valid options: 'piper', 'elevenlabs', 'openai'."
+        "Valid options: 'edge', 'piper', 'elevenlabs'."
+    )
+
+
+def _run_transcription_pipeline(content) -> str:
+    """
+    Single-voice narration pipeline: read the article aloud in full.
+
+    Skips LLM and dialogue planning entirely — the Markdown is cleaned
+    and sent straight to the configured TTS provider, chunk by chunk.
+    """
+    print("[2/4] Converting to Markdown...")
+    markdown_text = convert_to_markdown(content)
+    print(f"      Markdown length: {len(markdown_text)} characters")
+
+    print("[3/4] Detecting language...")
+    language_code = detect_language(markdown_text)
+    print(f"      Detected language: {language_code}")
+
+    print(f"[4/4] Narrating with {config.TTS_PROVIDER} (single voice)...")
+    from transcription.narrator import narrate
+    tts = build_tts_provider()
+    return narrate(
+        markdown_text=markdown_text,
+        language_code=language_code,
+        tts_provider=tts,
+        voice="voice_a",
+        output_path=config.OUTPUT_PATH,
     )
 
 
@@ -145,6 +172,9 @@ def run_pipeline(raw_input: str) -> str:
 
     if config.PODCAST_PROVIDER.lower() == "notebooklm":
         return _run_notebooklm_pipeline(content)
+
+    if config.PODCAST_PROVIDER.lower() == "transcription":
+        return _run_transcription_pipeline(content)
 
     print("[2/5] Converting to Markdown...")
     markdown_text = convert_to_markdown(content)

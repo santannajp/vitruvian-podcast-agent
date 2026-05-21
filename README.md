@@ -1,14 +1,3 @@
----
-title: Vitruvian Audio Agent
-emoji: 🎙️
-colorFrom: blue
-colorTo: purple
-sdk: docker
-app_port: 7860
-pinned: false
-short_description: Transforma textos, PDFs e URLs em podcasts conversacionais.
----
-
 # Vitruvian Audio Agent — Content → Podcast Engine
 
 Converts written content into a conversational podcast using two AI-generated voices.
@@ -301,9 +290,11 @@ The following rules are enforced and tested:
 
 ---
 
-## Deploy — Docker / Hugging Face Spaces
+## Deploy — Docker / Render
 
-The repository ships with a production-ready `Dockerfile` (Python 3.11, multi-stage build, non-root user, Playwright + Chromium for the NotebookLM provider, ffmpeg for audio export). The image listens on port `7860`, matching the Hugging Face Spaces convention.
+The repository ships with a production-ready `Dockerfile` (Python 3.11, multi-stage build, non-root user, Playwright + Chromium for the NotebookLM provider, ffmpeg for audio export) and a `render.yaml` Blueprint for Infrastructure-as-Code deployment to [Render](https://render.com).
+
+The container listens on the port given by `$PORT` (which Render injects automatically), falling back to `7860` for local runs.
 
 ### Build & run locally
 
@@ -319,19 +310,35 @@ docker run --rm -p 7860:7860 \
 
 Then open `http://localhost:7860` and enter the password you generated.
 
-### Deploy to Hugging Face Spaces (Docker SDK)
+### Deploy to Render (recommended path — Blueprint)
 
-1. Create a **new Space** at <https://huggingface.co/spaces>, choosing **Docker** as the SDK and (optionally) **Private** visibility.
-2. Push this repository to the Space's git remote:
-   ```bash
-   git remote add space https://huggingface.co/spaces/<user>/<space-name>
-   git push space main
-   ```
-   The YAML frontmatter at the top of this README is what tells Spaces to use Docker on port 7860.
-3. In **Settings → Variables and secrets**, add the values you need as **Secrets** (never plain variables):
-   - `APP_PASSWORD` — long random string. Anyone who reaches the Space URL must enter this to use the app.
-   - `GROQ_API_KEY`, `OPENAI_API_KEY`, `ELEVENLABS_API_KEY` — only if you intend to bake the keys into the deployment. Otherwise users paste their own in the sidebar at runtime.
-   - `LLM_PROVIDER`, `TTS_PROVIDER`, `PODCAST_PROVIDER` — defaults for the dropdowns.
+1. Push this repository to GitHub/GitLab (Render reads the code from there).
+2. In the Render dashboard: **New → Blueprint** → connect your repo.
+3. Render detects `render.yaml` automatically and prompts you for the secret values. Fill in only the ones you actually need:
+   - `APP_PASSWORD` — long random string (`openssl rand -hex 24`). Required.
+   - `GROQ_API_KEY` / `OPENAI_API_KEY` / `ELEVENLABS_API_KEY` — only if you want them pre-baked. Otherwise users paste their own keys in the sidebar.
+   - `NOTEBOOKLM_STORAGE_STATE_B64` — only if you want the NotebookLM engine. See below.
+4. Render builds the image and brings up the service. First build takes ~10 min (Playwright + Chromium download).
+
+The Blueprint defaults to the **Starter** plan ($7/mo) and the **oregon** region — edit `render.yaml` to change either.
+
+### Deploy to Render (without the Blueprint)
+
+If you prefer the dashboard:
+1. **New → Web Service** → connect repo.
+2. Runtime: **Docker**. Dockerfile path: `./Dockerfile`.
+3. Health Check Path: `/_stcore/health`.
+4. Add the env vars listed above as **Secret** values (not regular env vars).
+
+### Plan / sizing notes
+
+| Plan | RAM | Verdict |
+|---|---|---|
+| Free | 512 MB | ⚠️ Will OOM with Chromium. Sleeps after 15 min idle. OK only for Pipeline + Transcrição modes |
+| Starter ($7/mo) | 512 MB | ⚠️ Same RAM as free. No sleep. Acceptable without NotebookLM |
+| Standard ($25/mo) | 2 GB | ✅ Comfortable, including NotebookLM/Chromium |
+
+If you need NotebookLM, go straight to **Standard**.
 
 ### NotebookLM in a deployed container
 
@@ -347,20 +354,21 @@ notebooklm login
 base64 -w0 ~/.notebooklm/profiles/default/storage_state.json
 ```
 
-Copy that string into the Space's Secrets as `NOTEBOOKLM_STORAGE_STATE_B64`. On startup the app decodes it into the expected path (with `0600` perms) before any NotebookLM call runs. The bootstrap is idempotent and validates the payload is JSON with a `cookies` field — invalid secrets are logged and ignored, never written to disk.
+Copy that string into Render → Environment → `NOTEBOOKLM_STORAGE_STATE_B64`. On startup the entrypoint decodes it into the expected path (with `0600` perms) *before* Streamlit boots. The bootstrap is idempotent and validates the payload is JSON with a `cookies` field — invalid secrets are logged and ignored, never written to disk.
 
 **Caveats:**
 
-- Sessions expire. When NotebookLM rejects the cookie, the deployed app surfaces a "re-authenticate" error — you'll need to re-run `notebooklm login` locally and push a new secret.
-- The Pipeline (LLM + TTS) and Transcrição modes work without this secret. Only the NotebookLM engine needs it.
+- Sessions expire. When NotebookLM rejects the cookie, the app surfaces a "re-authenticate" error — re-run `notebooklm login` locally and update the env var.
+- The Pipeline (LLM + TTS) and Transcrição modes work without this secret.
 
 ### Security checklist
 
-- ✅ `APP_PASSWORD` set as a Secret (long, random — `openssl rand -hex 24`).
-- ✅ All API keys configured as **Secrets**, not Variables (Variables are visible to anyone who can read the Space).
+- ✅ `APP_PASSWORD` set as a Render **secret** (long, random — `openssl rand -hex 24`).
+- ✅ All API keys configured as Render **secrets** (`sync: false` in `render.yaml` keeps them out of git).
 - ✅ `.dockerignore` excludes `.env`, `.notebooklm/`, virtualenvs and generated audio — no secrets baked into the image.
 - ✅ Image runs as non-root user `app` (UID 1000).
-- ✅ Streamlit XSRF protection enabled, CORS disabled, usage stats opt-out.
+- ✅ Streamlit XSRF protection on, headless mode, usage stats opt-out.
 - ✅ Password comparison uses `hmac.compare_digest` (timing-safe) with a 5-attempt cap per session.
-- ⚠️ **HF Spaces is public-tunnelled by default.** Private visibility hides the *code* and *Space page* but the URL itself can still be reached by anyone with the link — `APP_PASSWORD` is your real gate.
-- ⚠️ Pin `requirements.txt` versions before publishing widely; the current file uses `>=` ranges suitable for development.
+- ✅ Render auto-provisions TLS for the assigned `*.onrender.com` URL (and any custom domain).
+- ⚠️ Render web services are **public by default**. `APP_PASSWORD` is the only access gate — make it long and random.
+- ⚠️ Pin `requirements.txt` versions before publishing widely; the file currently uses `>=` ranges suitable for development.

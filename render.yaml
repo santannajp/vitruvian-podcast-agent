@@ -1,0 +1,58 @@
+# Render Blueprint — https://render.com/docs/blueprint-spec
+#
+# Defines the Vitruvian Audio Agent web service as Infrastructure-as-Code.
+# Push this file to your repo and connect the repo to Render to deploy:
+#   1. Render dashboard → New → Blueprint → pick this repo
+#   2. Set the secret values when prompted (none are hard-coded here)
+#
+# Plan note: `starter` ($7/mo) is the minimum recommended. The free tier
+# has 512 MB RAM and sleeps after 15 min idle — Playwright/Chromium will
+# struggle there.
+
+services:
+  - type: web
+    name: vitruvian-audio
+    runtime: docker
+    plan: starter            # bump to `standard` if you actually use NotebookLM (Chromium needs RAM)
+    region: oregon           # change to a region near you (oregon | frankfurt | singapore | ohio | virginia)
+    branch: main
+    dockerfilePath: ./Dockerfile
+    healthCheckPath: /_stcore/health
+    autoDeploy: true
+
+    # Persistent disk is optional. Enable it if you ever cache generated
+    # audio across requests — otherwise the ephemeral filesystem is fine.
+    # disk:
+    #   name: audio-cache
+    #   mountPath: /home/app/cache
+    #   sizeGB: 1
+
+    envVars:
+      # --- Streamlit hardening (the Dockerfile already sets these, but
+      # repeating here makes them visible in the Render dashboard) ---
+      - key: STREAMLIT_SERVER_HEADLESS
+        value: "true"
+      - key: STREAMLIT_SERVER_ENABLE_XSRF_PROTECTION
+        value: "true"
+      - key: STREAMLIT_BROWSER_GATHER_USAGE_STATS
+        value: "false"
+
+      # --- App secrets ---
+      # sync: false means Render will prompt you to enter the value during
+      # the first deploy and never expose it in the blueprint or git.
+      - key: APP_PASSWORD
+        sync: false
+      - key: GROQ_API_KEY
+        sync: false
+      - key: OPENAI_API_KEY
+        sync: false
+      - key: ELEVENLABS_API_KEY
+        sync: false
+      - key: NOTEBOOKLM_STORAGE_STATE_B64
+        sync: false
+
+      # --- Defaults users can override in the Streamlit sidebar ---
+      - key: LLM_PROVIDER
+        value: groq
+      - key: TTS_PROVIDER
+        value: edge

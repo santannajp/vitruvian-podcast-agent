@@ -1,0 +1,77 @@
+# Secrets — NEVER bake into the image
+.env
+.env.*
+!.env.example
+.env_backup
+*.pem
+*.key
+
+# Local NotebookLM session — must come in via runtime secret
+.notebooklm/
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+.eggs/
+*.egg
+dist/
+build/
+
+# Virtualenvs (re-created inside the image)
+venv/
+.venv/
+env/
+audioagent/
+
+# Generated audio
+*.mp3
+*.wav
+podcast.mp3
+output/
+
+# Large model files (Piper voices) — mounted at runtime or downloaded if needed
+models/*.onnx
+models/*.onnx.json
+
+# Git metadata
+.git/
+.gitignore
+.gitattributes
+
+# IDEs
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Claude Code local config
+.claude/
+
+# OS junk
+.DS_Store
+Thumbs.db
+
+# Tests / artifacts not needed at runtime
+tests/
+run_tests.py
+test_results.txt
+pytest_cache/
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Docs / planning
+roadmap.md
+claude.md
+
+# Temp files
+*.tmp
+*.log
+
+# Docker leftovers
+Dockerfile
+.dockerignore

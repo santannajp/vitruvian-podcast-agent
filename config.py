@@ -113,3 +113,17 @@ NOTEBOOKLM_AUDIO_LENGTH: str = os.getenv("NOTEBOOKLM_AUDIO_LENGTH", "default")
 NOTEBOOKLM_INSTRUCTIONS: str = os.getenv("NOTEBOOKLM_INSTRUCTIONS", "")
 # Seconds to wait for audio generation to complete (default: 900 = 15 min)
 NOTEBOOKLM_WAIT_TIMEOUT: float = float(os.getenv("NOTEBOOKLM_WAIT_TIMEOUT", "900"))
+
+# Base64-encoded storage_state.json (notebooklm-py session). Required to use
+# the NotebookLM provider in headless deployments (HF Spaces, Cloud Run, …)
+# where the interactive OAuth flow cannot run. Generated locally with:
+#   base64 -w0 ~/.notebooklm/profiles/default/storage_state.json
+NOTEBOOKLM_STORAGE_STATE_B64: str = os.getenv("NOTEBOOKLM_STORAGE_STATE_B64", "")
+
+# ---------------------------------------------------------------------------
+# Deployment — access control
+# ---------------------------------------------------------------------------
+# Optional password that gates the Streamlit UI. When empty (default), the
+# app is open — this matches local development. When set (production /
+# Hugging Face Spaces), users must enter this password before the UI loads.
+APP_PASSWORD: str = os.getenv("APP_PASSWORD", "")

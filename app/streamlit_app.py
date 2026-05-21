@@ -25,6 +25,10 @@ sys.path.insert(0, str(ROOT))
 
 import config  # noqa: E402 — must come after sys.path setup
 from app.main import run_pipeline  # noqa: E402
+from nlm.bootstrap import bootstrap_storage_state  # noqa: E402
+
+# Materialize NotebookLM session from secret (no-op when not configured).
+bootstrap_storage_state()
 
 import streamlit as st  # noqa: E402
 
@@ -36,6 +40,13 @@ st.set_page_config(
     page_icon="🎙️",
     layout="centered",
 )
+
+# ---------------------------------------------------------------------------
+# Access control — no-op when APP_PASSWORD is empty (local dev), gates the
+# UI behind a password when set (production / HF Spaces).
+# ---------------------------------------------------------------------------
+from app.auth import require_password  # noqa: E402
+require_password()
 
 # ---------------------------------------------------------------------------
 # Session state initialisation

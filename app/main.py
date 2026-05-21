@@ -24,6 +24,12 @@ import os
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import config
+from nlm.bootstrap import bootstrap_storage_state
+
+# Materialize NotebookLM session from secret if NOTEBOOKLM_STORAGE_STATE_B64
+# is set. No-op otherwise — local development is unaffected.
+bootstrap_storage_state()
+
 from input.handler import handle_input
 from markdown.converter import convert_to_markdown
 from language.detector import detect_language

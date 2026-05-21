@@ -1,3 +1,14 @@
+---
+title: Vitruvian Audio Agent
+emoji: 🎙️
+colorFrom: blue
+colorTo: purple
+sdk: docker
+app_port: 7860
+pinned: false
+short_description: Transforma textos, PDFs e URLs em podcasts conversacionais.
+---
+
 # Vitruvian Audio Agent — Content → Podcast Engine
 
 Converts written content into a conversational podcast using two AI-generated voices.
@@ -287,3 +298,69 @@ The following rules are enforced and tested:
 6. Providers are called only inside their own modules.
 7. Detected language is propagated through every pipeline stage.
 8. The output podcast language matches the detected input language.
+
+---
+
+## Deploy — Docker / Hugging Face Spaces
+
+The repository ships with a production-ready `Dockerfile` (Python 3.11, multi-stage build, non-root user, Playwright + Chromium for the NotebookLM provider, ffmpeg for audio export). The image listens on port `7860`, matching the Hugging Face Spaces convention.
+
+### Build & run locally
+
+```bash
+docker build -t vitruvian-audio .
+
+docker run --rm -p 7860:7860 \
+    -e APP_PASSWORD="$(openssl rand -hex 24)" \
+    -e GROQ_API_KEY="…" \
+    -e OPENAI_API_KEY="…" \
+    vitruvian-audio
+```
+
+Then open `http://localhost:7860` and enter the password you generated.
+
+### Deploy to Hugging Face Spaces (Docker SDK)
+
+1. Create a **new Space** at <https://huggingface.co/spaces>, choosing **Docker** as the SDK and (optionally) **Private** visibility.
+2. Push this repository to the Space's git remote:
+   ```bash
+   git remote add space https://huggingface.co/spaces/<user>/<space-name>
+   git push space main
+   ```
+   The YAML frontmatter at the top of this README is what tells Spaces to use Docker on port 7860.
+3. In **Settings → Variables and secrets**, add the values you need as **Secrets** (never plain variables):
+   - `APP_PASSWORD` — long random string. Anyone who reaches the Space URL must enter this to use the app.
+   - `GROQ_API_KEY`, `OPENAI_API_KEY`, `ELEVENLABS_API_KEY` — only if you intend to bake the keys into the deployment. Otherwise users paste their own in the sidebar at runtime.
+   - `LLM_PROVIDER`, `TTS_PROVIDER`, `PODCAST_PROVIDER` — defaults for the dropdowns.
+
+### NotebookLM in a deployed container
+
+NotebookLM relies on a one-time Google OAuth flow that writes `~/.notebooklm/profiles/default/storage_state.json`. A container can't open a browser for that flow, so to use NotebookLM in production you ship the session as an env var.
+
+**One-time setup, locally:**
+
+```bash
+# Run the interactive login once on your machine
+notebooklm login
+
+# Encode the resulting session as base64 (no line wrapping)
+base64 -w0 ~/.notebooklm/profiles/default/storage_state.json
+```
+
+Copy that string into the Space's Secrets as `NOTEBOOKLM_STORAGE_STATE_B64`. On startup the app decodes it into the expected path (with `0600` perms) before any NotebookLM call runs. The bootstrap is idempotent and validates the payload is JSON with a `cookies` field — invalid secrets are logged and ignored, never written to disk.
+
+**Caveats:**
+
+- Sessions expire. When NotebookLM rejects the cookie, the deployed app surfaces a "re-authenticate" error — you'll need to re-run `notebooklm login` locally and push a new secret.
+- The Pipeline (LLM + TTS) and Transcrição modes work without this secret. Only the NotebookLM engine needs it.
+
+### Security checklist
+
+- ✅ `APP_PASSWORD` set as a Secret (long, random — `openssl rand -hex 24`).
+- ✅ All API keys configured as **Secrets**, not Variables (Variables are visible to anyone who can read the Space).
+- ✅ `.dockerignore` excludes `.env`, `.notebooklm/`, virtualenvs and generated audio — no secrets baked into the image.
+- ✅ Image runs as non-root user `app` (UID 1000).
+- ✅ Streamlit XSRF protection enabled, CORS disabled, usage stats opt-out.
+- ✅ Password comparison uses `hmac.compare_digest` (timing-safe) with a 5-attempt cap per session.
+- ⚠️ **HF Spaces is public-tunnelled by default.** Private visibility hides the *code* and *Space page* but the URL itself can still be reached by anyone with the link — `APP_PASSWORD` is your real gate.
+- ⚠️ Pin `requirements.txt` versions before publishing widely; the current file uses `>=` ranges suitable for development.

@@ -14,6 +14,8 @@ import os
 import subprocess
 import sys
 import tempfile
+import threading
+import time
 import traceback
 from pathlib import Path
 
@@ -61,6 +63,17 @@ if "nlm_pending" not in st.session_state:
     st.session_state.nlm_pending = {}
 if "nlm_login_proc" not in st.session_state:
     st.session_state.nlm_login_proc = None
+# Background pipeline state
+if "_pipeline_running" not in st.session_state:
+    st.session_state["_pipeline_running"] = False
+if "_pipeline_log" not in st.session_state:
+    st.session_state["_pipeline_log"] = []
+if "_pipeline_error" not in st.session_state:
+    st.session_state["_pipeline_error"] = None
+if "_pipeline_result_path" not in st.session_state:
+    st.session_state["_pipeline_result_path"] = None
+if "_pipeline_done" not in st.session_state:
+    st.session_state["_pipeline_done"] = False
 
 # ---------------------------------------------------------------------------
 # Header
@@ -293,18 +306,21 @@ else:  # Text
 has_input = bool(raw_input_value) or (uploaded_file is not None)
 
 # ---------------------------------------------------------------------------
-# Real-time log writer (streams run_pipeline prints into the UI)
+# Thread-safe log writer (captures stdout from background thread)
 # ---------------------------------------------------------------------------
-class _StreamlitWriter:
-    """Redirects stdout to a Streamlit code block, updating it live."""
+class _ThreadSafeWriter:
+    """Captures stdout from a background pipeline thread.
 
-    def __init__(self, container: st.delta_generator.DeltaGenerator) -> None:
-        self._container = container
-        self._lines: list[str] = []
+    Stores lines in a plain list. The main Streamlit thread reads this
+    list on each polling rerun and renders it. This avoids calling
+    Streamlit widget APIs from a non-main thread (which is not allowed).
+    """
+
+    def __init__(self, log_list: list[str]) -> None:
+        self._lines = log_list
 
     def write(self, text: str) -> None:
         self._lines.append(text)
-        self._container.code("".join(self._lines), language="")
 
     def flush(self) -> None:  # required by redirect_stdout
         pass
@@ -466,15 +482,25 @@ def _start_nlm_login() -> subprocess.Popen:
 
 
 # ---------------------------------------------------------------------------
-# Pipeline execution helper
+# Pipeline execution — background thread approach
+#
+# The pipeline (especially Edge TTS transcription) can take 30-120+ seconds.
+# Running it synchronously in Streamlit's main thread blocks the WebSocket
+# heartbeat, causing the connection to drop and the session_state (including
+# the auth flag) to be destroyed — the user sees the login screen.
+#
+# Solution: launch the pipeline in a daemon thread.  The main thread polls
+# every 2 seconds via st.rerun(), keeping the WebSocket alive and rendering
+# live progress from the shared log list.
 # ---------------------------------------------------------------------------
 
-def _execute_pipeline(
+def _start_pipeline(
     raw_input: str,
     file_bytes: bytes | None = None,
     file_suffix: str | None = None,
 ) -> None:
-    """Run the full pipeline and store result in st.session_state.result."""
+    """Prepare temp files and launch the pipeline in a background thread."""
+    # Prepare temp input file if needed
     tmp_input_path = None
     if file_bytes is not None:
         tmp_in = tempfile.NamedTemporaryFile(delete=False, suffix=file_suffix or "")
@@ -485,40 +511,83 @@ def _execute_pipeline(
     else:
         pipeline_input = raw_input
 
+    # Prepare temp output file
     tmp_out = tempfile.NamedTemporaryFile(delete=False, suffix=".mp3")
     tmp_out.close()
     config.OUTPUT_PATH = tmp_out.name
 
-    with st.status("🎙️ Generating your podcast…", expanded=True) as status:
-        log_box = st.empty()
-        writer = _StreamlitWriter(log_box)
-        error: Exception | None = None
+    # Reset pipeline state
+    log_list: list[str] = []
+    st.session_state["_pipeline_running"] = True
+    st.session_state["_pipeline_done"] = False
+    st.session_state["_pipeline_log"] = log_list
+    st.session_state["_pipeline_error"] = None
+    st.session_state["_pipeline_result_path"] = None
+    st.session_state["_pipeline_tmp_input"] = tmp_input_path
 
+    # Snapshot config values that the sidebar may have changed — the
+    # background thread must use these exact values, not whatever the
+    # config module holds at the time of a later rerun.
+    _cfg_snapshot = {
+        "PODCAST_PROVIDER": config.PODCAST_PROVIDER,
+        "TTS_PROVIDER": config.TTS_PROVIDER,
+        "LLM_PROVIDER": config.LLM_PROVIDER,
+        "OUTPUT_PATH": config.OUTPUT_PATH,
+    }
+    # Edge TTS voice config
+    if hasattr(config, "EDGE_TTS_VOICE_A"):
+        _cfg_snapshot["EDGE_TTS_VOICE_A"] = config.EDGE_TTS_VOICE_A
+        _cfg_snapshot["EDGE_TTS_VOICE_B"] = config.EDGE_TTS_VOICE_B
+
+    def _worker() -> None:
+        """Run the pipeline in a background thread."""
+        # Apply the config snapshot so sidebar changes during execution
+        # don't interfere.
+        for k, v in _cfg_snapshot.items():
+            setattr(config, k, v)
+
+        writer = _ThreadSafeWriter(log_list)
         try:
             with contextlib.redirect_stdout(writer):  # type: ignore[arg-type]
                 output_path = run_pipeline(pipeline_input)
-            status.update(label="✅ Podcast generated!", state="complete")
+            st.session_state["_pipeline_result_path"] = output_path
         except Exception as exc:  # noqa: BLE001
-            error = exc
-            error_tb = traceback.format_exc()
-            status.update(label=f"❌ Error: {exc}", state="error")
+            st.session_state["_pipeline_error"] = (
+                str(exc),
+                traceback.format_exc(),
+            )
+        finally:
+            # Clean up temp input
+            if tmp_input_path:
+                try:
+                    os.unlink(tmp_input_path)
+                except OSError:
+                    pass
+            st.session_state["_pipeline_running"] = False
+            st.session_state["_pipeline_done"] = True
 
-    if tmp_input_path:
-        try:
-            os.unlink(tmp_input_path)
-        except OSError:
-            pass
+    thread = threading.Thread(target=_worker, daemon=True)
+    thread.start()
 
-    if error:
-        # If this is a NotebookLM auth error (expired or missing session),
-        # trigger the login flow instead of showing a crash.
-        _err_str = str(error).lower()
-        if "notebooklm login" in _err_str or "re-authenticate" in _err_str or "authentication expired" in _err_str:
-            st.session_state.nlm_pending = {
-                "text_input": raw_input if file_bytes is None else "",
-                "file_bytes": file_bytes,
-                "file_suffix": file_suffix,
-            }
+
+def _finalize_pipeline() -> None:
+    """Collect results from the finished background pipeline and store in session_state."""
+    error_info = st.session_state.get("_pipeline_error")
+    output_path = st.session_state.get("_pipeline_result_path")
+    log_list = st.session_state.get("_pipeline_log", [])
+    log_text = "".join(log_list)
+
+    # Reset pipeline flags
+    st.session_state["_pipeline_done"] = False
+    st.session_state["_pipeline_running"] = False
+
+    if error_info:
+        error_msg, error_tb = error_info
+        st.session_state["_pipeline_error"] = None
+
+        # NotebookLM auth error → trigger login flow
+        _err_lower = error_msg.lower()
+        if "notebooklm login" in _err_lower or "re-authenticate" in _err_lower or "authentication expired" in _err_lower:
             try:
                 st.session_state.nlm_login_proc = _start_nlm_login()
             except RuntimeError as _login_err:
@@ -527,12 +596,19 @@ def _execute_pipeline(
             st.session_state.nlm_login_pending = True
             st.rerun()
 
-        st.error(str(error))
+        st.error(error_msg)
         with st.expander("🐛 Full traceback", expanded=True):
             st.code(error_tb, language="python")
-        st.stop()
+        with st.expander("📋 Pipeline log"):
+            st.code(log_text, language="")
+        return
 
-    log_text = writer.getvalue()
+    if not output_path or not os.path.exists(output_path):
+        st.error("Pipeline finished but no output file was produced.")
+        with st.expander("📋 Pipeline log"):
+            st.code(log_text, language="")
+        return
+
     language, pipeline_mode, script_lines, chunk_count = _parse_log(log_text)
 
     is_wav = output_path.endswith(".wav")
@@ -541,9 +617,6 @@ def _execute_pipeline(
 
     try:
         from pydub import AudioSegment  # noqa: PLC0415
-
-        # Use from_file() to auto-detect format — handles MP3, M4A/MP4 (NotebookLM),
-        # and WAV without needing to know the actual codec beforehand.
         seg = AudioSegment.from_file(output_path)
         duration_s = len(seg) / 1000.0
     except Exception:  # noqa: BLE001
@@ -568,7 +641,7 @@ def _execute_pipeline(
         "duration_s": duration_s,
         "log": log_text,
     }
-    # Clear any lingering login state after a successful run
+    # Clear any lingering login state
     st.session_state.nlm_login_pending = False
     st.session_state.nlm_pending = {}
     st.session_state.nlm_login_proc = None
@@ -577,7 +650,7 @@ def _execute_pipeline(
 # ---------------------------------------------------------------------------
 # Generate button
 # ---------------------------------------------------------------------------
-if st.button("🎧 Generate Podcast", type="primary", disabled=not has_input):
+if st.button("🎧 Generate Podcast", type="primary", disabled=(not has_input or st.session_state.get("_pipeline_running"))):
     _file_bytes = uploaded_file.getbuffer().tobytes() if uploaded_file else None
     _file_suffix = Path(uploaded_file.name).suffix if uploaded_file else None
     _text_input = raw_input_value if uploaded_file is None else ""
@@ -597,7 +670,25 @@ if st.button("🎧 Generate Podcast", type="primary", disabled=not has_input):
         st.session_state.nlm_login_pending = True
         st.rerun()
 
-    _execute_pipeline(_text_input or "", _file_bytes, _file_suffix)
+    _start_pipeline(_text_input or "", _file_bytes, _file_suffix)
+    st.rerun()  # Immediately rerun to enter the polling loop
+
+# ---------------------------------------------------------------------------
+# Pipeline progress polling — keeps WebSocket alive during long operations
+# ---------------------------------------------------------------------------
+if st.session_state.get("_pipeline_running"):
+    _log_lines = st.session_state.get("_pipeline_log", [])
+    with st.status("🎙️ Generating your podcast…", expanded=True):
+        st.code("".join(_log_lines) or "Starting…", language="")
+    # Sleep briefly then rerun — this is the key to keeping the
+    # Streamlit WebSocket alive during long operations.
+    time.sleep(2)
+    st.rerun()
+
+# Pipeline just finished — collect results
+if st.session_state.get("_pipeline_done"):
+    _finalize_pipeline()
+    st.rerun()  # Rerun to render the results section
 
 # ---------------------------------------------------------------------------
 # NotebookLM login flow (shown while waiting for the user to finish OAuth)
@@ -629,11 +720,12 @@ if st.session_state.nlm_login_pending:
             _pending = st.session_state.nlm_pending or {}
             st.session_state.nlm_login_pending = False
             st.session_state.nlm_pending = {}
-            _execute_pipeline(
+            _start_pipeline(
                 _pending.get("text_input") or "",
                 _pending.get("file_bytes"),
                 _pending.get("file_suffix"),
             )
+            st.rerun()
         else:
             st.error(
                 "Login não detectado. Certifique-se de ter concluído o login no Google "

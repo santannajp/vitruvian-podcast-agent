@@ -33,6 +33,7 @@ from nlm.bootstrap import bootstrap_storage_state  # noqa: E402
 bootstrap_storage_state()
 
 import streamlit as st  # noqa: E402
+from streamlit.runtime.scriptrunner import add_script_run_ctx, get_script_run_ctx  # noqa: E402
 
 # ---------------------------------------------------------------------------
 # Page config
@@ -567,6 +568,12 @@ def _start_pipeline(
             st.session_state["_pipeline_done"] = True
 
     thread = threading.Thread(target=_worker, daemon=True)
+    # Attach the main script's run context so st.session_state writes from
+    # the worker land in this user's session (otherwise they go to a bare
+    # fallback state and the main thread polls forever).
+    ctx = get_script_run_ctx()
+    if ctx is not None:
+        add_script_run_ctx(thread, ctx)
     thread.start()
 
 

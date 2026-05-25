@@ -8,7 +8,10 @@ and concatenated into the final podcast file.
 
 import gc
 import io
+import os
 import re
+import subprocess
+import tempfile
 
 from pydub import AudioSegment
 
@@ -60,26 +63,55 @@ def narrate(
     chunks = _split_for_tts(plain_text, _MAX_CHUNK_CHARS)
     print(f"      [Transcription] Cleaned text: {len(plain_text)} chars → {len(chunks)} chunk(s).")
 
-    # Stream-merge: synthesize each chunk, append to the running podcast,
-    # then drop the chunk so peak memory stays roughly the size of the final
-    # audio (instead of N copies, which OOM-kills small instances).
-    pause = AudioSegment.silent(duration=_PAUSE_BETWEEN_CHUNKS_MS)
-    podcast: AudioSegment | None = None
+    mp3_path = _replace_extension(output_path, ".mp3")
 
-    for i, chunk in enumerate(chunks, start=1):
-        print(f"      [Transcription] Synthesizing chunk {i}/{len(chunks)} ({len(chunk)} chars)…")
-        raw_audio = tts_provider.synthesize(text=chunk, voice=voice, language=language_code)
-        if raw_audio[:4] == b"RIFF":
-            seg = AudioSegment.from_wav(io.BytesIO(raw_audio))
-        else:
-            seg = AudioSegment.from_file(io.BytesIO(raw_audio))
-        del raw_audio
+    # Disk-based pipeline: write each synthesized chunk to a temp MP3,
+    # then have ffmpeg concat them with stream-copy (no decoding). Peak
+    # RAM is bounded by one chunk regardless of total podcast length,
+    # which is required to fit under 512 MB instance limits.
+    with tempfile.TemporaryDirectory(prefix="narrator_") as tmpdir:
+        silence_path = os.path.join(tmpdir, "silence.mp3")
+        AudioSegment.silent(duration=_PAUSE_BETWEEN_CHUNKS_MS).export(
+            silence_path, format="mp3", bitrate="128k"
+        )
 
-        podcast = seg if podcast is None else podcast + pause + seg
-        del seg
-        gc.collect()
+        chunk_paths: list[str] = []
+        for i, chunk in enumerate(chunks, start=1):
+            print(f"      [Transcription] Synthesizing chunk {i}/{len(chunks)} ({len(chunk)} chars)…")
+            raw_audio = tts_provider.synthesize(text=chunk, voice=voice, language=language_code)
+            chunk_mp3 = os.path.join(tmpdir, f"chunk_{i:03d}.mp3")
+            if raw_audio[:4] == b"RIFF":
+                seg = AudioSegment.from_wav(io.BytesIO(raw_audio))
+            else:
+                seg = AudioSegment.from_file(io.BytesIO(raw_audio))
+            del raw_audio
+            seg.export(chunk_mp3, format="mp3", bitrate="128k")
+            del seg
+            gc.collect()
+            chunk_paths.append(chunk_mp3)
 
-    return _export(podcast, output_path)
+        list_file = os.path.join(tmpdir, "concat.txt")
+        with open(list_file, "w", encoding="utf-8") as fh:
+            for idx, path in enumerate(chunk_paths):
+                if idx > 0:
+                    fh.write(f"file '{silence_path}'\n")
+                fh.write(f"file '{path}'\n")
+
+        try:
+            subprocess.run(
+                ["ffmpeg", "-y", "-f", "concat", "-safe", "0",
+                 "-i", list_file, "-c", "copy", mp3_path],
+                check=True, capture_output=True,
+            )
+            print(f"[Transcription] Audio assembled via ffmpeg stream-copy → {mp3_path}")
+            return mp3_path
+        except (subprocess.CalledProcessError, FileNotFoundError) as exc:
+            # Fallback: pydub stream-merge (used by local dev without
+            # ffmpeg, or if stream-copy fails on mismatched formats).
+            stderr = getattr(exc, "stderr", b"")
+            print(f"[Transcription] ffmpeg concat failed ({exc}); falling back to pydub merge. "
+                  f"stderr: {stderr.decode('utf-8', errors='replace')[:300] if stderr else '<none>'}")
+            return _pydub_merge_and_export(chunk_paths, output_path)
 
 
 # ---------------------------------------------------------------------------
@@ -241,19 +273,29 @@ def _hard_wrap(text: str, max_chars: int) -> list[str]:
 
 
 # ---------------------------------------------------------------------------
-# Audio export
+# Audio export (fallback path when ffmpeg concat is unavailable)
 # ---------------------------------------------------------------------------
 
-def _export(podcast: AudioSegment, output_path: str) -> str:
-    """Export to MP3 (ffmpeg → lameenc → WAV fallback). Mirrors audio/builder.py."""
+def _pydub_merge_and_export(chunk_paths: list[str], output_path: str) -> str:
+    """Stream-merge MP3 files via pydub and export. Higher RAM use than the
+    ffmpeg concat path — used only as a fallback (e.g. local dev without
+    ffmpeg, or stream-copy refusing a format mismatch)."""
     mp3_path = _replace_extension(output_path, ".mp3")
+    pause = AudioSegment.silent(duration=_PAUSE_BETWEEN_CHUNKS_MS)
+
+    podcast: AudioSegment | None = None
+    for path in chunk_paths:
+        seg = AudioSegment.from_file(path)
+        podcast = seg if podcast is None else podcast + pause + seg
+        del seg
+        gc.collect()
 
     try:
         podcast.export(mp3_path, format="mp3", bitrate="320k")
-        print("[Transcription] Audio exported as MP3 (ffmpeg, 320 kbps).")
+        print("[Transcription] Audio exported as MP3 (pydub fallback, 320 kbps).")
         return mp3_path
     except Exception as ffmpeg_err:
-        print(f"[Transcription] ffmpeg not available ({ffmpeg_err}), trying lameenc…")
+        print(f"[Transcription] pydub MP3 export failed ({ffmpeg_err}), trying lameenc…")
 
     try:
         import lameenc  # noqa: PLC0415

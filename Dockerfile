@@ -8,9 +8,9 @@
 #             -e OPENAI_API_KEY="…" \
 #             vitruvian-audio
 #
-# Target platform: Hugging Face Spaces (Docker SDK, port 7860).
-# Includes Playwright + Chromium so the NotebookLM provider works when a
-# storage_state.json is supplied; see README for the caveats.
+# Production image does NOT include the NotebookLM provider (Playwright +
+# Chromium). Use NotebookLM only in local dev — install it manually there
+# with: pip install "notebooklm-py[browser]" && playwright install chromium.
 
 # ---------------------------------------------------------------------------
 # Stage 1 — builder: install Python deps into a virtualenv
@@ -33,8 +33,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY requirements.txt ./
 RUN python -m venv /opt/venv \
     && /opt/venv/bin/pip install --upgrade pip setuptools wheel \
-    && /opt/venv/bin/pip install -r requirements.txt \
-    && /opt/venv/bin/pip install "notebooklm-py[browser]"
+    && /opt/venv/bin/pip install -r requirements.txt
 
 
 # ---------------------------------------------------------------------------
@@ -45,10 +44,8 @@ FROM python:3.11.9-slim-bookworm AS runtime
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PATH="/opt/venv/bin:$PATH" \
-    # HF Spaces convention — keep the writable cache under the app dir.
     HOME=/home/app \
     XDG_CACHE_HOME=/home/app/.cache \
-    PLAYWRIGHT_BROWSERS_PATH=/home/app/.cache/ms-playwright \
     # Streamlit hardening
     STREAMLIT_SERVER_PORT=7860 \
     STREAMLIT_SERVER_ADDRESS=0.0.0.0 \
@@ -56,28 +53,12 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     STREAMLIT_SERVER_ENABLE_XSRF_PROTECTION=true \
     STREAMLIT_BROWSER_GATHER_USAGE_STATS=false
 
-# Runtime system deps: ffmpeg (audio export), curl (healthcheck), tini (PID 1),
-# plus Chromium runtime libs needed by Playwright.
+# Runtime system deps: ffmpeg (audio export), curl (healthcheck), tini (PID 1).
 RUN apt-get update && apt-get install -y --no-install-recommends \
         ffmpeg \
         curl \
         tini \
         ca-certificates \
-        libnss3 \
-        libatk1.0-0 \
-        libatk-bridge2.0-0 \
-        libcups2 \
-        libdrm2 \
-        libxkbcommon0 \
-        libxcomposite1 \
-        libxdamage1 \
-        libxfixes3 \
-        libxrandr2 \
-        libgbm1 \
-        libpango-1.0-0 \
-        libcairo2 \
-        libasound2 \
-        libatspi2.0-0 \
     && rm -rf /var/lib/apt/lists/*
 
 # Non-root user. UID 1000 matches what HF Spaces expects.
@@ -88,12 +69,7 @@ RUN groupadd --gid 1000 app \
 COPY --from=builder --chown=app:app /opt/venv /opt/venv
 
 WORKDIR /home/app
-
-# Install Chromium for Playwright as the non-root user so the binary lands in
-# the user-writable cache. --with-deps already covered above so we skip it
-# here (the apt step above installed everything Playwright needs).
 USER app
-RUN python -m playwright install chromium
 
 # Copy application source last so code changes don't bust the heavy layers.
 COPY --chown=app:app . /home/app/

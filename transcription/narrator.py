@@ -6,6 +6,7 @@ split into TTS-sized chunks, synthesized one by one with a single voice,
 and concatenated into the final podcast file.
 """
 
+import gc
 import io
 import re
 
@@ -59,16 +60,25 @@ def narrate(
     chunks = _split_for_tts(plain_text, _MAX_CHUNK_CHARS)
     print(f"      [Transcription] Cleaned text: {len(plain_text)} chars → {len(chunks)} chunk(s).")
 
-    segments: list[AudioSegment] = []
+    # Stream-merge: synthesize each chunk, append to the running podcast,
+    # then drop the chunk so peak memory stays roughly the size of the final
+    # audio (instead of N copies, which OOM-kills small instances).
+    pause = AudioSegment.silent(duration=_PAUSE_BETWEEN_CHUNKS_MS)
+    podcast: AudioSegment | None = None
+
     for i, chunk in enumerate(chunks, start=1):
         print(f"      [Transcription] Synthesizing chunk {i}/{len(chunks)} ({len(chunk)} chars)…")
         raw_audio = tts_provider.synthesize(text=chunk, voice=voice, language=language_code)
         if raw_audio[:4] == b"RIFF":
-            segments.append(AudioSegment.from_wav(io.BytesIO(raw_audio)))
+            seg = AudioSegment.from_wav(io.BytesIO(raw_audio))
         else:
-            segments.append(AudioSegment.from_file(io.BytesIO(raw_audio)))
+            seg = AudioSegment.from_file(io.BytesIO(raw_audio))
+        del raw_audio
 
-    podcast = _merge(segments)
+        podcast = seg if podcast is None else podcast + pause + seg
+        del seg
+        gc.collect()
+
     return _export(podcast, output_path)
 
 
@@ -231,17 +241,8 @@ def _hard_wrap(text: str, max_chars: int) -> list[str]:
 
 
 # ---------------------------------------------------------------------------
-# Audio merge / export
+# Audio export
 # ---------------------------------------------------------------------------
-
-def _merge(segments: list[AudioSegment]) -> AudioSegment:
-    """Concatenate segments with a short pause in between."""
-    pause = AudioSegment.silent(duration=_PAUSE_BETWEEN_CHUNKS_MS)
-    podcast = segments[0]
-    for seg in segments[1:]:
-        podcast = podcast + pause + seg
-    return podcast
-
 
 def _export(podcast: AudioSegment, output_path: str) -> str:
     """Export to MP3 (ffmpeg → lameenc → WAV fallback). Mirrors audio/builder.py."""
